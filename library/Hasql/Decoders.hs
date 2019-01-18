@@ -14,10 +14,17 @@ module Hasql.Decoders
   -- ** Multi-row traversers
   foldlRows,
   foldrRows,
+  -- * Columnar types
+  Columnar(..),
+  -- * Positioned types
+  Positioned(..),
+  -- * Named types
+  Named(..),
   -- * Row
   Row,
-  column,
-  nullableColumn,
+  -- ** Row metadata
+  columnNames,
+  columnPosition,
   -- * Value
   Value,
   bool,
@@ -51,16 +58,15 @@ module Hasql.Decoders
   -- * Array
   Array,
   dimension,
-  element,
-  nullableElement,
   -- * Composite
   Composite,
-  field,
-  nullableField,
+  -- * NullableGroup
+  NullableGroup,
+  group
 )
 where
 
-import Hasql.Private.Prelude hiding (maybe, bool)
+import Hasql.Private.Prelude hiding (maybe, bool, group)
 import qualified Data.Vector as Vector
 import qualified PostgreSQL.Binary.Decoding as A
 import qualified PostgreSQL.Binary.Data as B
@@ -70,6 +76,7 @@ import qualified Hasql.Private.Decoders.Row as Row
 import qualified Hasql.Private.Decoders.Value as Value
 import qualified Hasql.Private.Decoders.Array as Array
 import qualified Hasql.Private.Decoders.Composite as Composite
+import qualified Hasql.Private.Decoders.NullableGroup as Group
 import qualified Hasql.Private.Prelude as Prelude
 
 -- * Result
@@ -77,16 +84,16 @@ import qualified Hasql.Private.Prelude as Prelude
 
 -- |
 -- Decoder of a query result.
--- 
+--
 newtype Result a =
   Result (Results.Results a)
   deriving (Functor)
 
 -- |
 -- Decode no value from the result.
--- 
+--
 -- Useful for statements like @INSERT@ or @CREATE@.
--- 
+--
 {-# INLINABLE unit #-}
 unit :: Result ()
 unit =
@@ -95,7 +102,7 @@ unit =
 -- |
 -- Get the amount of rows affected by such statements as
 -- @UPDATE@ or @DELETE@.
--- 
+--
 {-# INLINABLE rowsAffected #-}
 rowsAffected :: Result Int64
 rowsAffected =
@@ -104,7 +111,7 @@ rowsAffected =
 -- |
 -- Exactly one row.
 -- Will raise the 'Hasql.Errors.UnexpectedAmountOfRows' error if it's any other.
--- 
+--
 {-# INLINABLE singleRow #-}
 singleRow :: Row a -> Result a
 singleRow (Row row) =
@@ -115,7 +122,7 @@ singleRow (Row row) =
 
 -- |
 -- Foldl multiple rows.
--- 
+--
 {-# INLINABLE foldlRows #-}
 foldlRows :: (a -> b -> a) -> a -> Row b -> Result a
 foldlRows step init (Row row) =
@@ -123,7 +130,7 @@ foldlRows step init (Row row) =
 
 -- |
 -- Foldr multiple rows.
--- 
+--
 {-# INLINABLE foldrRows #-}
 foldrRows :: (b -> a -> a) -> a -> Row b -> Result a
 foldrRows step init (Row row) =
@@ -134,7 +141,7 @@ foldrRows step init (Row row) =
 
 -- |
 -- Maybe one row or none.
--- 
+--
 {-# INLINABLE rowMaybe #-}
 rowMaybe :: Row a -> Result (Maybe a)
 rowMaybe (Row row) =
@@ -142,10 +149,10 @@ rowMaybe (Row row) =
 
 -- |
 -- Zero or more rows packed into the vector.
--- 
+--
 -- It's recommended to prefer this function to 'rowList',
 -- since it performs notably better.
--- 
+--
 {-# INLINABLE rowVector #-}
 rowVector :: Row a -> Result (Vector a)
 rowVector (Row row) =
@@ -153,7 +160,7 @@ rowVector (Row row) =
 
 -- |
 -- Zero or more rows packed into the list.
--- 
+--
 {-# INLINABLE rowList #-}
 rowList :: Row a -> Result [a]
 rowList =
@@ -206,33 +213,25 @@ instance Default (Row a) => Default (Result (Identity a)) where
 -- |
 -- Decoder of an individual row,
 -- which gets composed of column value decoders.
--- 
+--
 -- E.g.:
--- 
+--
 -- >x :: Row (Maybe Int64, Text, TimeOfDay)
 -- >x =
 -- >  (,,) <$> nullableColumn int8 <*> column text <*> column time
--- 
+--
 newtype Row a =
   Row (Row.Row a)
   deriving (Functor, Applicative, Monad)
 
+{-
 -- |
--- Lift an individual non-nullable value decoder to a composable row decoder.
--- 
-{-# INLINABLE column #-}
-column :: Value a -> Row a
-column (Value imp) =
-  Row (Row.nonNullValue imp)
-
--- |
--- Lift an individual nullable value decoder to a composable row decoder.
--- 
-{-# INLINABLE nullableColumn #-}
-nullableColumn :: Value a -> Row (Maybe a)
-nullableColumn (Value imp) =
-  Row (Row.value imp)
-
+-- Lift one or more nullable value decodings into a group
+--
+nullableColumns :: Row a -> Row (Maybe a)
+nullableColumns (Row (Row.Row oneOrMoreColumns)) =
+  Row (Row.Row $ local (\(env, _) -> env)) oneOrMoreColumns)
+-}
 
 -- ** Instances
 -------------------------
@@ -240,25 +239,42 @@ nullableColumn (Value imp) =
 instance Default (Value a) => Default (Row (Identity a)) where
   {-# INLINE def #-}
   def =
-    fmap Identity (column def)
+    fmap Identity (field def)
 
 instance Default (Value a) => Default (Row (Maybe a)) where
   {-# INLINE def #-}
   def =
-    nullableColumn def
+    nullableField def
 
 instance (Default (Value a1), Default (Value a2)) => Default (Row (a1, a2)) where
   {-# INLINE def #-}
   def =
-    ap (fmap (,) (column def)) (column def)
+    ap (fmap (,) (field def)) (field def)
 
+-- ** Row metadata
+
+-- |
+-- The index of the next unconsumed column. Not recommended
+-- for general use, but may be useful in tandem with 'columnNames'.
+--
+{-# INLINE columnPosition #-}
+columnPosition :: Row Int
+columnPosition = Row Row.columnPosition
+
+-- |
+-- A vector containing all of the column names within the Row.
+-- Identical for all 'Row's within a 'Result'
+--
+{-# INLINE columnNames #-}
+columnNames :: Row (Vector ByteString)
+columnNames = Row Row.columnNames
 
 -- * Value
 -------------------------
 
 -- |
 -- Decoder of an individual value.
--- 
+--
 newtype Value a =
   Value (Value.Value a)
   deriving (Functor)
@@ -269,7 +285,7 @@ newtype Value a =
 
 -- |
 -- Decoder of the @BOOL@ values.
--- 
+--
 {-# INLINABLE bool #-}
 bool :: Value Bool
 bool =
@@ -277,7 +293,7 @@ bool =
 
 -- |
 -- Decoder of the @INT2@ values.
--- 
+--
 {-# INLINABLE int2 #-}
 int2 :: Value Int16
 int2 =
@@ -285,7 +301,7 @@ int2 =
 
 -- |
 -- Decoder of the @INT4@ values.
--- 
+--
 {-# INLINABLE int4 #-}
 int4 :: Value Int32
 int4 =
@@ -293,16 +309,16 @@ int4 =
 
 -- |
 -- Decoder of the @INT8@ values.
--- 
+--
 {-# INLINABLE int8 #-}
 int8 :: Value Int64
 int8 =
-  {-# SCC "int8" #-} 
+  {-# SCC "int8" #-}
   Value (Value.decoder (const ({-# SCC "int8.int" #-} A.int)))
 
 -- |
 -- Decoder of the @FLOAT4@ values.
--- 
+--
 {-# INLINABLE float4 #-}
 float4 :: Value Float
 float4 =
@@ -310,7 +326,7 @@ float4 =
 
 -- |
 -- Decoder of the @FLOAT8@ values.
--- 
+--
 {-# INLINABLE float8 #-}
 float8 :: Value Double
 float8 =
@@ -318,7 +334,7 @@ float8 =
 
 -- |
 -- Decoder of the @NUMERIC@ values.
--- 
+--
 {-# INLINABLE numeric #-}
 numeric :: Value B.Scientific
 numeric =
@@ -334,7 +350,7 @@ char =
 
 -- |
 -- Decoder of the @TEXT@ values.
--- 
+--
 {-# INLINABLE text #-}
 text :: Value Text
 text =
@@ -342,7 +358,7 @@ text =
 
 -- |
 -- Decoder of the @BYTEA@ values.
--- 
+--
 {-# INLINABLE bytea #-}
 bytea :: Value ByteString
 bytea =
@@ -350,7 +366,7 @@ bytea =
 
 -- |
 -- Decoder of the @DATE@ values.
--- 
+--
 {-# INLINABLE date #-}
 date :: Value B.Day
 date =
@@ -358,7 +374,7 @@ date =
 
 -- |
 -- Decoder of the @TIMESTAMP@ values.
--- 
+--
 {-# INLINABLE timestamp #-}
 timestamp :: Value B.LocalTime
 timestamp =
@@ -366,9 +382,9 @@ timestamp =
 
 -- |
 -- Decoder of the @TIMESTAMPTZ@ values.
--- 
+--
 -- /NOTICE/
--- 
+--
 -- Postgres does not store the timezone information of @TIMESTAMPTZ@.
 -- Instead it stores a UTC value and performs silent conversions
 -- to the currently set timezone, when dealt with in the text format.
@@ -381,7 +397,7 @@ timestamptz =
 
 -- |
 -- Decoder of the @TIME@ values.
--- 
+--
 {-# INLINABLE time #-}
 time :: Value B.TimeOfDay
 time =
@@ -389,8 +405,8 @@ time =
 
 -- |
 -- Decoder of the @TIMETZ@ values.
--- 
--- Unlike in case of @TIMESTAMPTZ@, 
+--
+-- Unlike in case of @TIMESTAMPTZ@,
 -- Postgres does store the timezone information for @TIMETZ@.
 -- However the Haskell's \"time\" library does not contain any composite type,
 -- that fits the task, so we use a pair of 'TimeOfDay' and 'TimeZone'
@@ -402,7 +418,7 @@ timetz =
 
 -- |
 -- Decoder of the @INTERVAL@ values.
--- 
+--
 {-# INLINABLE interval #-}
 interval :: Value B.DiffTime
 interval =
@@ -410,7 +426,7 @@ interval =
 
 -- |
 -- Decoder of the @UUID@ values.
--- 
+--
 {-# INLINABLE uuid #-}
 uuid :: Value B.UUID
 uuid =
@@ -426,7 +442,7 @@ inet =
 
 -- |
 -- Decoder of the @JSON@ values into a JSON AST.
--- 
+--
 {-# INLINABLE json #-}
 json :: Value B.Value
 json =
@@ -434,7 +450,7 @@ json =
 
 -- |
 -- Decoder of the @JSON@ values into a raw JSON 'ByteString'.
--- 
+--
 {-# INLINABLE jsonBytes #-}
 jsonBytes :: (ByteString -> Either Text a) -> Value a
 jsonBytes fn =
@@ -442,7 +458,7 @@ jsonBytes fn =
 
 -- |
 -- Decoder of the @JSONB@ values into a JSON AST.
--- 
+--
 {-# INLINABLE jsonb #-}
 jsonb :: Value B.Value
 jsonb =
@@ -450,7 +466,7 @@ jsonb =
 
 -- |
 -- Decoder of the @JSONB@ values into a raw JSON 'ByteString'.
--- 
+--
 {-# INLINABLE jsonbBytes #-}
 jsonbBytes :: (ByteString -> Either Text a) -> Value a
 jsonbBytes fn =
@@ -458,7 +474,7 @@ jsonbBytes fn =
 
 -- |
 -- Lifts a custom value decoder function to a 'Value' decoder.
--- 
+--
 {-# INLINABLE custom #-}
 custom :: (Bool -> ByteString -> Either Text a) -> Value a
 custom fn =
@@ -478,7 +494,7 @@ refine fn (Value v) =
 
 -- |
 -- Lifts the 'Array' decoder to the 'Value' decoder.
--- 
+--
 {-# INLINABLE array #-}
 array :: Array a -> Value a
 array (Array imp) =
@@ -486,7 +502,7 @@ array (Array imp) =
 
 -- |
 -- Lifts the 'Composite' decoder to the 'Value' decoder.
--- 
+--
 {-# INLINABLE composite #-}
 composite :: Composite a -> Value a
 composite (Composite imp) =
@@ -494,15 +510,15 @@ composite (Composite imp) =
 
 -- |
 -- A generic decoder of @HSTORE@ values.
--- 
+--
 -- Here's how you can use it to construct a specific value:
--- 
+--
 -- @
 -- x :: Value [(Text, Maybe Text)]
 -- x =
 --   hstore 'replicateM'
 -- @
--- 
+--
 {-# INLINABLE hstore #-}
 hstore :: (forall m. Monad m => Int -> m (Text, Maybe Text) -> m a) -> Value a
 hstore replicateM =
@@ -651,15 +667,15 @@ instance Default (Value B.Value) where
 
 -- |
 -- A generic array decoder.
--- 
+--
 -- Here's how you can use it to produce a specific array value decoder:
--- 
+--
 -- @
 -- x :: Value [[Text]]
 -- x =
 --   array (dimension 'replicateM' (dimension 'replicateM' (element text)))
 -- @
--- 
+--
 newtype Array a =
   Array (Array.Array a)
   deriving (Functor)
@@ -667,34 +683,20 @@ newtype Array a =
 -- |
 -- A function for parsing a dimension of an array.
 -- Provides support for multi-dimensional arrays.
--- 
+--
 -- Accepts:
--- 
+--
 -- * An implementation of the @replicateM@ function
 -- (@Control.Monad.'Control.Monad.replicateM'@, @Data.Vector.'Data.Vector.replicateM'@),
 -- which determines the output value.
--- 
+--
 -- * A decoder of its components, which can be either another 'dimension',
 -- 'element' or 'nullableElement'.
--- 
+--
 {-# INLINABLE dimension #-}
 dimension :: (forall m. Monad m => Int -> m a -> m b) -> Array a -> Array b
 dimension replicateM (Array imp) =
   Array (Array.dimension replicateM imp)
-
--- |
--- Lift a 'Value' decoder into an 'Array' decoder for parsing of non-nullable leaf values.
-{-# INLINABLE element #-}
-element :: Value a -> Array a
-element (Value imp) =
-  Array (Array.nonNullValue (Value.run imp))
-
--- |
--- Lift a 'Value' decoder into an 'Array' decoder for parsing of nullable leaf values.
-{-# INLINABLE nullableElement #-}
-nullableElement :: Value a -> Array (Maybe a)
-nullableElement (Value imp) =
-  Array (Array.value (Value.run imp))
 
 
 -- * Composite decoders
@@ -706,17 +708,103 @@ newtype Composite a =
   Composite (Composite.Composite a)
   deriving (Functor, Applicative, Monad)
 
--- |
--- Lift a 'Value' decoder into a 'Composite' decoder for parsing of non-nullable leaf values.
-{-# INLINABLE field #-}
-field :: Value a -> Composite a
-field (Value imp) =
-  Composite (Composite.nonNullValue (Value.run imp))
+-- * Nullable group
+-------------------------
 
 -- |
--- Lift a 'Value' decoder into a 'Composite' decoder for parsing of nullable leaf values.
-{-# INLINABLE nullableField #-}
-nullableField :: Value a -> Composite (Maybe a)
-nullableField (Value imp) =
-  Composite (Composite.value (Value.run imp))
+-- A generic nullable group decoder. Useful for defining a 'Columnar' decoder and reusing it in joins.
+--
+-- @
+-- -- Text is email, Maybe Text is name
+-- userRow :: (Applicative c, Columnar c) => c (Text, Maybe Text)
+-- userRow = (,) <$> field text <*> nullableField text
+-- @
+--
+-- > rowVector (group userRow) :: Result (Vector (Maybe (Text, Maybe Text)))
+--
+-- > rowVector userRow :: Result (Vector (Text, Maybe Text))
+--
+newtype NullableGroup a =
+  NullableGroup (Group.NullableGroup a)
+  deriving (Functor, Applicative)
 
+
+-- |
+-- Decode a group of values which may all be nullable.
+-- If any field decoded via 'field' returns 'Nothing', the group will return 'Nothing'.
+--
+-- Fields decoded via 'nullableField' may be @NULL@ while allowing the group to return a 'Just' value.
+group :: NullableGroup a -> Row (Maybe a)
+group (NullableGroup g) = Row $ Group.run g
+
+class Columnar f where
+  field :: Value a -> f a
+  nullableField :: Value a -> f (Maybe a)
+
+instance Columnar Row where
+  -- |
+  -- Lift an individual non-nullable value decoder to a composable row decoder.
+  --
+  {-# INLINABLE field #-}
+  field (Value imp) =
+    Row (Row.nonNullValue imp)
+  -- |
+  -- Lift an individual nullable value decoder to a composable row decoder.
+  --
+  {-# INLINABLE nullableField #-}
+  nullableField (Value imp) =
+    Row (Row.value imp)
+
+instance Columnar Array where
+  -- |
+  -- Lift a 'Value' decoder into an 'Array' decoder for parsing of non-nullable leaf values.
+  {-# INLINABLE field #-}
+  field (Value imp) =
+    Array (Array.nonNullValue (Value.run imp))
+
+  -- |
+  -- Lift a 'Value' decoder into an 'Array' decoder for parsing of nullable leaf values.
+  {-# INLINABLE nullableField #-}
+  nullableField (Value imp) =
+    Array (Array.value (Value.run imp))
+
+
+instance Columnar Composite where
+  -- |
+  -- Lift a 'Value' decoder into a 'Composite' decoder for parsing of non-nullable leaf values.
+  {-# INLINABLE field #-}
+  field (Value imp) =
+    Composite (Composite.nonNullValue (Value.run imp))
+  -- |
+  -- Lift a 'Value' decoder into a 'Composite' decoder for parsing of nullable leaf values.
+  {-# INLINABLE nullableField #-}
+  nullableField (Value imp) =
+    Composite (Composite.value (Value.run imp))
+
+instance Columnar NullableGroup where
+  {-# INLINABLE field #-}
+  field (Value imp) =
+    NullableGroup (Group.nonNullValue imp)
+
+  {-# INLINABLE nullableField #-}
+  nullableField (Value imp) =
+    NullableGroup (Group.value imp)
+
+class Positioned f where
+  fieldPosition :: f Int
+
+instance Positioned Row where
+  fieldPosition = Row Row.columnPosition
+instance Positioned NullableGroup where
+  fieldPosition = NullableGroup Group.columnPosition
+
+class Named f where
+  allFieldNames :: f (Vector ByteString)
+  nextFieldName :: f ByteString
+
+instance Named Row where
+  allFieldNames = Row Row.columnNames
+  nextFieldName = (Vector.!) <$> allFieldNames <*> fieldPosition
+instance Named NullableGroup where
+  allFieldNames = NullableGroup Group.columnNames
+  nextFieldName = (Vector.!) <$> allFieldNames <*> fieldPosition

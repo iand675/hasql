@@ -23,7 +23,7 @@ dropType name =
 createEnum :: ByteString -> [ByteString] -> HQ.Statement () ()
 createEnum name values =
   plain $
-    "create type " <> name <> " as enum (" <> 
+    "create type " <> name <> " as enum (" <>
     mconcat (intersperse ", " (map (\x -> "'" <> x <> "'") values)) <> ")"
 
 selectList :: HQ.Statement () ([] (Int64, Int64))
@@ -33,4 +33,31 @@ selectList =
     sql =
       "values (1,2), (3,4), (5,6)"
     decoder =
-      HD.rowList ((,) <$> HD.column HD.int8 <*> HD.column HD.int8)
+      HD.rowList ((,) <$> HD.field HD.int8 <*> HD.field HD.int8)
+
+selectNames :: HQ.Statement () (Vector ByteString)
+selectNames =
+  HQ.Statement sql mempty decoder True
+  where
+    sql =
+      "select 1 as foo, 2 as bar, 3"
+    decoder =
+      HD.singleRow HD.columnNames
+
+selectNamesAndResult :: HQ.Statement () (Vector ByteString, Int64, Int64, Int64)
+selectNamesAndResult =
+  HQ.Statement sql mempty decoder True
+  where
+    sql =
+      "select 1 as foo, 2 as bar, 3"
+    decoder =
+      HD.singleRow ((,,,) <$> HD.columnNames <*> HD.field HD.int8 <*> HD.field HD.int8 <*> HD.field HD.int8)
+
+selectNullableGroup :: HQ.Statement () (Int64, Maybe (Int64, Int64))
+selectNullableGroup =
+  HQ.Statement sql mempty decoder True
+  where
+    sql =
+      "select 1, 2, null"
+    decoder =
+      HD.singleRow ((,) <$> HD.field HD.int8 <*> HD.group ((,) <$> HD.field HD.int8 <*> HD.field HD.int8))

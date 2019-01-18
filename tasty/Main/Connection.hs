@@ -17,10 +17,10 @@ with handler =
         settings =
           HC.settings host port user password database
           where
-            host = "localhost"
+            host = "127.0.0.1"
             port = 5432
             user = "postgres"
-            password = ""
+            password = "password"
             database = "postgres"
     use connection =
       lift $ handler connection

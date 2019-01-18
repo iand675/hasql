@@ -2,6 +2,7 @@ module Hasql.Private.Decoders.Row where
 
 import Hasql.Private.Prelude
 import Hasql.Private.Errors
+import Data.Vector (generateM)
 import qualified Database.PostgreSQL.LibPQ as LibPQ
 import qualified PostgreSQL.Binary.Decoding as A
 import qualified Hasql.Private.Decoders.Value as Value
@@ -12,18 +13,19 @@ newtype Row a =
   deriving (Functor, Applicative, Monad)
 
 data Env =
-  Env !LibPQ.Result !LibPQ.Row !LibPQ.Column !Bool !(IORef LibPQ.Column)
-
+  Env !LibPQ.Result !LibPQ.Row !LibPQ.Column !Bool !(IORef LibPQ.Column) !(Vector ByteString)
 
 -- * Functions
 -------------------------
 
 {-# INLINE run #-}
 run :: Row a -> (LibPQ.Result, LibPQ.Row, LibPQ.Column, Bool) -> IO (Either RowError a)
-run (Row impl) (result, row, columnsAmount, integerDatetimes) =
+run (Row impl) (result, row, columnsAmount@(LibPQ.Col columnsInt), integerDatetimes) =
   do
     columnRef <- newIORef 0
-    runExceptT (runReaderT impl (Env result row columnsAmount integerDatetimes columnRef))
+    columnNames <- unsafeInterleaveIO $
+      generateM (fromIntegral columnsInt) (fmap (fromMaybe "") . LibPQ.fname result . LibPQ.toColumn)
+    runExceptT (runReaderT impl (Env result row columnsAmount integerDatetimes columnRef columnNames))
 
 {-# INLINE error #-}
 error :: RowError -> Row a
@@ -35,14 +37,14 @@ error x =
 {-# INLINE value #-}
 value :: Value.Value a -> Row (Maybe a)
 value valueDec =
-  {-# SCC "value" #-} 
-  Row $ ReaderT $ \(Env result row columnsAmount integerDatetimes columnRef) -> ExceptT $ do
+  {-# SCC "value" #-}
+  Row $ ReaderT $ \(Env result row columnsAmount integerDatetimes columnRef _) -> ExceptT $ do
     col <- readIORef columnRef
     writeIORef columnRef (succ col)
     if col < columnsAmount
       then do
         valueMaybe <- {-# SCC "getvalue'" #-} LibPQ.getvalue' result row col
-        pure $ 
+        pure $
           case valueMaybe of
             Nothing ->
               Right Nothing
@@ -56,5 +58,23 @@ value valueDec =
 {-# INLINE nonNullValue #-}
 nonNullValue :: Value.Value a -> Row a
 nonNullValue valueDec =
-  {-# SCC "nonNullValue" #-} 
+  {-# SCC "nonNullValue" #-}
   value valueDec >>= maybe (error UnexpectedNull) pure
+
+-- ** Column metadata
+
+-- |
+-- The index of the next unconsumed column. Not recommended
+-- for general use, but may be useful in tandem with 'columnNames'.
+{-# INLINE columnPosition #-}
+columnPosition :: Row Int
+columnPosition = Row $ do
+  (Env _ _ _ _ columnRef _) <- ask
+  (LibPQ.Col c) <- liftIO $ readIORef columnRef
+  pure $ fromIntegral c
+
+{-# INLINE columnNames #-}
+columnNames :: Row (Vector ByteString)
+columnNames = Row $ do
+  (Env _ _ _ _ _ columnNames) <- ask
+  pure $! columnNames
