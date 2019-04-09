@@ -50,3 +50,16 @@ release (Connection pqConnectionRef _ _) =
 withLibPQConnection :: Connection -> (LibPQ.Connection -> IO a) -> IO a
 withLibPQConnection (Connection pqConnectionRef _ _) =
   withMVar pqConnectionRef
+
+-- |
+-- Create a @hasql@ 'Connection' using the provided lockable @libpq@ 'LibPQ.Connection'.
+fromLibPQConnection :: MVar LibPQ.Connection -> IO (Either ConnectionError Connection)
+fromLibPQConnection pqConnectionRef =
+  {-# SCC "fromLibPQConnection" #-}
+  withMVar pqConnectionRef $ \pqConnection -> do
+    runExceptT $ do
+      lift (IO.checkConnectionStatus pqConnection) >>= traverse throwError
+      lift (IO.initConnection pqConnection)
+      integerDatetimes <- lift (IO.getIntegerDatetimes pqConnection)
+      registry <- lift (IO.acquirePreparedStatementRegistry)
+      pure (Connection pqConnectionRef integerDatetimes registry)

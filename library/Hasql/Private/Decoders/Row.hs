@@ -12,8 +12,9 @@ newtype Row a =
   Row (ReaderT Env (ExceptT RowError IO) a)
   deriving (Functor, Applicative, Monad)
 
+-- Vectors here are lazy intentionally
 data Env =
-  Env !LibPQ.Result !LibPQ.Row !LibPQ.Column !Bool !(IORef LibPQ.Column) !(Vector ByteString)
+  Env !LibPQ.Result !LibPQ.Row !LibPQ.Column !Bool !(IORef LibPQ.Column) (Vector ByteString) (Vector LibPQ.Oid)
 
 -- * Functions
 -------------------------
@@ -25,12 +26,13 @@ run (Row impl) (result, row, columnsAmount@(LibPQ.Col columnsInt), integerDateti
     columnRef <- newIORef 0
     columnNames <- unsafeInterleaveIO $
       generateM (fromIntegral columnsInt) (fmap (fromMaybe "") . LibPQ.fname result . LibPQ.toColumn)
-    runExceptT (runReaderT impl (Env result row columnsAmount integerDatetimes columnRef columnNames))
+    columnOids <- unsafeInterleaveIO $
+      generateM (fromIntegral columnsInt) (LibPQ.ftype result . LibPQ.toColumn)
+    runExceptT (runReaderT impl (Env result row columnsAmount integerDatetimes columnRef columnNames columnOids))
 
 {-# INLINE error #-}
 error :: RowError -> Row a
-error x =
-  Row (ReaderT (const (ExceptT (pure (Left x)))))
+error = Row . ReaderT . const . ExceptT . pure . Left
 
 -- |
 -- Next value, decoded using the provided value decoder.
@@ -38,7 +40,7 @@ error x =
 value :: Value.Value a -> Row (Maybe a)
 value valueDec =
   {-# SCC "value" #-}
-  Row $ ReaderT $ \(Env result row columnsAmount integerDatetimes columnRef _) -> ExceptT $ do
+  Row $ ReaderT $ \(Env result row columnsAmount integerDatetimes columnRef _ _) -> ExceptT $ do
     col <- readIORef columnRef
     writeIORef columnRef (succ col)
     if col < columnsAmount
@@ -69,12 +71,18 @@ nonNullValue valueDec =
 {-# INLINE columnPosition #-}
 columnPosition :: Row Int
 columnPosition = Row $ do
-  (Env _ _ _ _ columnRef _) <- ask
+  (Env _ _ _ _ columnRef _ _) <- ask
   (LibPQ.Col c) <- liftIO $ readIORef columnRef
   pure $ fromIntegral c
 
 {-# INLINE columnNames #-}
 columnNames :: Row (Vector ByteString)
 columnNames = Row $ do
-  (Env _ _ _ _ _ columnNames) <- ask
+  (Env _ _ _ _ _ columnNames _) <- ask
   pure $! columnNames
+
+{-# INLINE columnOids #-}
+columnOids :: Row (Vector LibPQ.Oid)
+columnOids = Row $ do
+  (Env _ _ _ _ _ _ columnOids) <- ask
+  pure $! columnOids

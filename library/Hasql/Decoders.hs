@@ -24,6 +24,7 @@ module Hasql.Decoders
   Row,
   -- ** Row metadata
   columnNames,
+  columnOids,
   columnPosition,
   -- * Value
   Value,
@@ -68,6 +69,7 @@ where
 
 import Hasql.Private.Prelude hiding (maybe, bool, group)
 import qualified Data.Vector as Vector
+import Database.PostgreSQL.LibPQ (Oid)
 import qualified PostgreSQL.Binary.Decoding as A
 import qualified PostgreSQL.Binary.Data as B
 import qualified Hasql.Private.Decoders.Results as Results
@@ -268,6 +270,13 @@ columnPosition = Row Row.columnPosition
 {-# INLINE columnNames #-}
 columnNames :: Row (Vector ByteString)
 columnNames = Row Row.columnNames
+
+-- | A vector containing all of the column oids within the Row.
+-- Identical for all 'Row's within a 'Result'
+--
+{-# INLINE columnOids #-}
+columnOids :: Row (Vector Oid)
+columnOids = Row Row.columnOids
 
 -- * Value
 -------------------------
@@ -795,6 +804,7 @@ class Positioned f where
 
 instance Positioned Row where
   fieldPosition = Row Row.columnPosition
+
 instance Positioned NullableGroup where
   fieldPosition = NullableGroup Group.columnPosition
 
@@ -805,6 +815,7 @@ class Named f where
 instance Named Row where
   allFieldNames = Row Row.columnNames
   nextFieldName = (Vector.!) <$> allFieldNames <*> fieldPosition
+
 instance Named NullableGroup where
   allFieldNames = NullableGroup Group.columnNames
   nextFieldName = (Vector.!) <$> allFieldNames <*> fieldPosition

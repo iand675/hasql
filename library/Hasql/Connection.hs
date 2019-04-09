@@ -8,7 +8,8 @@ module Hasql.Connection
   release,
   Settings,
   settings,
-  withLibPQConnection
+  withLibPQConnection,
+  fromLibPQConnection
 )
 where
 
